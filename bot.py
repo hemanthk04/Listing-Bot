@@ -1,76 +1,51 @@
-"""
-Telegram List Manager Bot
--------------------------
-Features:
-- Create lists
-- Add items to lists
-- Show all lists
-- Show specific list
-- Delete item (with index selection)
-- Edit item (with index selection)
-- JSON file storage (simple + persistent)
-
-Author: YOU
-"""
-
 import json
 import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 from config import BOT_TOKEN
 
-
 DATA_FILE = "lists.json"
 
-# -----------------------
-# Load or initialize JSON
-# -----------------------
+# load storage
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r") as f:
         lists = json.load(f)
 else:
     lists = {}
 
+pending_actions = {}  # temporary delete/edit mode
 
-# --------------------------------------------------
-# Temporary state memory for delete/edit flows
-# Example:
-# pending_actions[user_id] = {
-#     "type": "delete",
-#     "list": "Substack Ideas"
-# }
-# --------------------------------------------------
-pending_actions = {}
-
-
-def save_data():
-    """Save all lists to JSON file."""
+def save():
     with open(DATA_FILE, "w") as f:
         json.dump(lists, f, indent=4)
 
+# convert name to a key
+def normalize(name):
+    return name.strip().lower()
 
-# ==================================================
-# MAIN MESSAGE HANDLER
-# ==================================================
+# find actual list name (case-preserved)
+def find_list(name):
+    key = normalize(name)
+    for real in lists.keys():
+        if normalize(real) == key:
+            return real
+    return None
+
+
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
 
-    # ---------------------------------------------
-    # 0️⃣ If user is in a pending action (delete/edit)
-    # ---------------------------------------------
+    # handle pending delete/edit
     if user_id in pending_actions:
         action = pending_actions[user_id]
 
-        # -------------------------
-        # DELETE MODE (step 2)
-        # User replies: "delete 2"
-        # -------------------------
+        # delete item
         if action["type"] == "delete":
             if text.lower().startswith("delete"):
                 parts = text.split()
                 if len(parts) != 2 or not parts[1].isdigit():
-                    await update.message.reply_text("❌ Use: delete 2")
+                    await update.message.reply_text("Use: delete 2")
                     return
 
                 index = int(parts[1]) - 1
@@ -78,190 +53,166 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 items = lists[list_name]
 
                 if index < 0 or index >= len(items):
-                    await update.message.reply_text("❌ Invalid number.")
+                    await update.message.reply_text("Invalid number")
                     return
 
-                removed_item = items.pop(index)
-                save_data()
+                removed = items.pop(index)
+                save()
                 del pending_actions[user_id]
 
                 await update.message.reply_text(
-                    f"🗑️ Deleted from *{list_name}*:\n{removed_item}",
+                    f"Deleted from *{list_name}*:\n{removed}",
                     parse_mode="Markdown"
                 )
                 return
 
-        # -------------------------
-        # EDIT MODE (step 2)
-        # User replies: "edit 2 -> new text"
-        # -------------------------
+        # edit item
         if action["type"] == "edit":
             if text.lower().startswith("edit"):
                 try:
-                    command, rest = text.split(" ", 1)
+                    _, rest = text.split(" ", 1)
                     index_str, new_text = rest.split("->")
                     index = int(index_str.strip()) - 1
                     new_text = new_text.strip()
                 except:
-                    await update.message.reply_text("❌ Use: edit 2 -> new text")
+                    await update.message.reply_text("Use: edit 2 -> new text")
                     return
 
                 list_name = action["list"]
                 items = lists[list_name]
 
                 if index < 0 or index >= len(items):
-                    await update.message.reply_text("❌ Invalid number.")
+                    await update.message.reply_text("Invalid number")
                     return
 
-                old_value = items[index]
+                old = items[index]
                 items[index] = new_text
-                save_data()
+                save()
                 del pending_actions[user_id]
 
                 await update.message.reply_text(
-                    f"✏️ Edited in *{list_name}*:\n{old_value} → {new_text}",
+                    f"Updated in *{list_name}*:\n{old} → {new_text}",
                     parse_mode="Markdown"
                 )
                 return
 
-    # ---------------------------------------------
-    # 1️⃣ Show all lists
-    # ---------------------------------------------
+    # show all lists
     if text.lower() == "lists":
         if not lists:
-            await update.message.reply_text("No lists created yet.")
+            await update.message.reply_text("No lists available")
             return
-
-        formatted = "\n".join([f"• {name}" for name in lists.keys()])
         await update.message.reply_text(
-            f"📂 *Your Lists:*\n{formatted}",
+            "\n".join([f"• {name}" for name in lists]),
             parse_mode="Markdown"
         )
         return
 
-    # ---------------------------------------------
-    # 2️⃣ Create List
-    # ---------------------------------------------
+    # create list
     if text.lower().startswith("create list -"):
         list_name = text.split("-", 1)[1].strip()
+
+        # check if exists ignoring case
+        existing = find_list(list_name)
+        if existing:
+            await update.message.reply_text("List already exists")
+            return
+
         lists[list_name] = []
-        save_data()
-
-        await update.message.reply_text(
-            f"✅ List created: *{list_name}*",
-            parse_mode="Markdown"
-        )
+        save()
+        await update.message.reply_text(f"Created: *{list_name}*", parse_mode="Markdown")
         return
 
-    # ---------------------------------------------
-    # 3️⃣ Delete Mode (step 1)
-    # User: "Delete from Substack Ideas"
-    # ---------------------------------------------
+    # delete mode start
     if text.lower().startswith("delete from"):
-        list_name = text.split("from", 1)[1].strip()
+        raw_name = text.split("from", 1)[1].strip()
+        list_name = find_list(raw_name)
 
-        if list_name not in lists:
-            await update.message.reply_text("❌ List not found.")
+        if not list_name:
+            await update.message.reply_text("List not found")
             return
-
         if not lists[list_name]:
-            await update.message.reply_text("❌ List is empty.")
+            await update.message.reply_text("List is empty")
             return
 
-        pending_actions[user_id] = {
-            "type": "delete",
-            "list": list_name
-        }
+        pending_actions[user_id] = {"type": "delete", "list": list_name}
 
         items = lists[list_name]
-        formatted = "\n".join([f"{i+1}. {item}" for i, item in enumerate(items)])
+        formatted = "\n".join([f"{i+1}. {v}" for i, v in enumerate(items)])
 
         await update.message.reply_text(
-            f"📃 *Items in {list_name}:*\n{formatted}\n\nReply with: delete 2",
+            f"{formatted}\n\nReply: delete 2",
             parse_mode="Markdown"
         )
         return
 
-    # ---------------------------------------------
-    # 4️⃣ Edit Mode (step 1)
-    # User: "Edit from Substack Ideas"
-    # ---------------------------------------------
+    # edit mode start
     if text.lower().startswith("edit from"):
-        list_name = text.split("from", 1)[1].strip()
+        raw_name = text.split("from", 1)[1].strip()
+        list_name = find_list(raw_name)
 
-        if list_name not in lists:
-            await update.message.reply_text("❌ List not found.")
+        if not list_name:
+            await update.message.reply_text("List not found")
             return
-
         if not lists[list_name]:
-            await update.message.reply_text("❌ List is empty.")
+            await update.message.reply_text("List is empty")
             return
 
-        pending_actions[user_id] = {
-            "type": "edit",
-            "list": list_name
-        }
+        pending_actions[user_id] = {"type": "edit", "list": list_name}
 
         items = lists[list_name]
-        formatted = "\n".join([f"{i+1}. {item}" for i, item in enumerate(items)])
+        formatted = "\n".join([f"{i+1}. {v}" for i, v in enumerate(items)])
 
         await update.message.reply_text(
-            f"✏️ *Items in {list_name}:*\n{formatted}\n\nReply with:\nedit 2 -> new text",
+            f"{formatted}\n\nReply: edit 2 -> new text",
             parse_mode="Markdown"
         )
         return
 
-# to add a new item in specific list
+    # add item
     if "-" in text:
-        list_name, item = [x.strip() for x in text.split("-", 1)]
+        name_part, item = [x.strip() for x in text.split("-", 1)]
+        list_name = find_list(name_part)
 
-        if list_name in lists:
+        if list_name:
             lists[list_name].append(item)
-            save_data()
-
+            save()
             await update.message.reply_text(
-                f"➕ Added to *{list_name}*: {item}",
+                f"Added to *{list_name}*: {item}",
                 parse_mode="Markdown"
             )
             return
 
-#show a specific list
-    if text in lists:
-        items = lists[text]
-
+    # show a list
+    list_name = find_list(text)
+    if list_name:
+        items = lists[list_name]
         if not items:
-            await update.message.reply_text(f"📃 *{text}* is empty.", parse_mode="Markdown")
+            await update.message.reply_text(f"{list_name} is empty")
             return
 
         formatted = "\n".join([f"• {i}" for i in items])
         await update.message.reply_text(
-            f"📃 *{text}*\n{formatted}",
+            f"{list_name}\n{formatted}",
             parse_mode="Markdown"
         )
         return
 
-# for help command
+    # help text
     await update.message.reply_text(
         "Commands:\n"
-        "• Create list - Name\n"
-        "• Name - Item\n"
-        "• lists (show all lists)\n\n"
-        "Deleting:\n"
-        "• Delete from Name\n"
-        "• delete 2\n\n"
-        "Editing:\n"
-        "• Edit from Name\n"
-        "• edit 2 -> new text\n\n"
-        "• Name (show contents)"
+        "Create list - Name\n"
+        "Name - Item\n"
+        "lists\n"
+        "Delete from Name\n"
+        "delete 2\n"
+        "Edit from Name\n"
+        "edit 2 -> text\n"
+        "Name"
     )
 
 
-# ==================================================
-# START BOT
-# ==================================================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
-
-    print("🤖 Bot is running...\nPress CTRL + C to stop.")
+    print("Bot running...")
     app.run_polling()
